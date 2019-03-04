@@ -87,6 +87,10 @@ func codegen(w io.Writer, opts options, cli *http.Client) error {
 		enc.SetLocalNamespace(opts.Namespace)
 	}
 
+	if u, err := url.Parse(opts.Src); err == nil && u.User != nil {
+		enc.SetAuthInfo(u.Host, u.User)
+	}
+
 	return enc.Encode(d)
 }
 

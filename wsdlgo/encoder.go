@@ -41,6 +41,9 @@ type Encoder interface {
 	// and WSDL schemas.
 	SetClient(c *http.Client)
 
+	// SetAuthInfo allows setting of basic auth per domain
+	SetAuthInfo(host string, user *url.Userinfo)
+
 	// SetLocalNamespace allows overriding of the Namespace in XMLName instead
 	// of the one specified in wsdl
 	SetLocalNamespace(namespace string)
@@ -52,6 +55,8 @@ type goEncoder struct {
 
 	// http client
 	http *http.Client
+	// http basic credentials for host
+	authInfo map[string]*url.Userinfo
 
 	// some mechanism to name package
 	packageName fmt.Stringer
@@ -93,6 +98,7 @@ func NewEncoder(w io.Writer) Encoder {
 	return &goEncoder{
 		w:               w,
 		http:            http.DefaultClient,
+		authInfo:        make(map[string]*url.Userinfo),
 		stypes:          make(map[string]*wsdl.SimpleType),
 		ctypes:          make(map[string]*wsdl.ComplexType),
 		elements:        make(map[string]*wsdl.Element),
@@ -112,6 +118,15 @@ func (ge *goEncoder) SetPackageName(name fmt.Stringer) {
 
 func (ge *goEncoder) SetClient(c *http.Client) {
 	ge.http = c
+}
+
+// SetAuthInfo allows setting of basic auth per domain
+func (ge *goEncoder) SetAuthInfo(host string, user *url.Userinfo) {
+	if user == nil {
+		return
+	}
+
+	ge.authInfo[host] = user
 }
 
 func gofmtPath() (string, error) {
@@ -266,32 +281,49 @@ func (ge *goEncoder) importRoot(d *wsdl.Definitions) error {
 
 func (ge *goEncoder) importSchema(d *wsdl.Definitions) error {
 	for _, imp := range d.Schema.Imports {
-		if imp.Location == "" {
-			continue
+		err := ge.includeImport(d, imp.Location)
+		if err != nil {
+			return err
 		}
-		schema := &wsdl.Schema{}
-		err := ge.importRemote(imp.Location, schema)
+	}
+
+	for _, imp := range d.Schema.Includes {
+		err := ge.includeImport(d, imp.Location)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (ge *goEncoder) includeImport(d *wsdl.Definitions, location string) error {
+	if location == "" {
+		return nil
+	}
+	schema := &wsdl.Schema{}
+	err := ge.importRemote(location, schema)
+	if err != nil {
+		return err
+	}
+	ge.unionSchemasData(d, schema)
+	for _, item := range schema.Imports {
+		schema = &wsdl.Schema{}
+		err := ge.importRemote(item.Location, schema)
 		if err != nil {
 			return err
 		}
 		ge.unionSchemasData(d, schema)
-		for _, item := range schema.Imports {
-			schema = &wsdl.Schema{}
-			err := ge.importRemote(item.Location, schema)
-			if err != nil {
-				return err
-			}
-			ge.unionSchemasData(d, schema)
-		}
-		for _, item := range schema.Includes {
-			schema = &wsdl.Schema{}
-			err := ge.importRemote(item.Location, schema)
-			if err != nil {
-				return err
-			}
-			ge.unionSchemasData(d, schema)
-		}
 	}
+	for _, item := range schema.Includes {
+		schema = &wsdl.Schema{}
+		err := ge.importRemote(item.Location, schema)
+		if err != nil {
+			return err
+		}
+		ge.unionSchemasData(d, schema)
+	}
+
 	return nil
 }
 
@@ -325,7 +357,11 @@ func (ge *goEncoder) importRemote(loc string, v interface{}) error {
 	var r io.Reader
 	switch u.Scheme {
 	case "http", "https":
-		resp, err := ge.http.Get(loc)
+		if u.User == nil {
+			u.User = ge.authInfo[u.Host]
+		}
+
+		resp, err := ge.http.Get(u.String())
 		if err != nil {
 			return err
 		}
@@ -348,13 +384,8 @@ func (ge *goEncoder) importRemote(loc string, v interface{}) error {
 
 func (ge *goEncoder) cacheTypes(d *wsdl.Definitions) {
 	// operation types are declared as go struct types
-	for _, v := range d.Schema.Elements {
-		if v.Type == "" && v.ComplexType != nil {
-			ct := *v.ComplexType
-			ct.Name = v.Name
-			ge.ctypes[v.Name] = &ct
-		}
-	}
+	ge.cacheTypesForElements(d.Schema.Elements)
+
 	// simple types map 1:1 to go basic types
 	for _, v := range d.Schema.SimpleTypes {
 		ge.stypes[v.Name] = v
@@ -368,6 +399,18 @@ func (ge *goEncoder) cacheTypes(d *wsdl.Definitions) {
 	// cache elements from complex types
 	for _, ct := range ge.ctypes {
 		ge.cacheComplexTypeElements(ct)
+	}
+}
+func (ge *goEncoder) cacheTypesForElements(elements []*wsdl.Element) {
+	for _, v := range elements {
+		if v.Type == "" && v.ComplexType != nil {
+			ct := *v.ComplexType
+			ct.Name = v.Name
+			ge.ctypes[v.Name] = &ct
+		}
+		if v.ComplexType != nil && v.ComplexType.Sequence != nil {
+			ge.cacheTypesForElements(v.ComplexType.Sequence.Elements)
+		}
 	}
 }
 
@@ -1576,6 +1619,9 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element) {
 		}
 	}
 	et := el.Type
+	if et == "" && ge.ctypes[el.Name] != nil {
+		et = el.Name
+	}
 	if et == "" {
 		et = "string"
 	}
