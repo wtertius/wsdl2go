@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/fiorix/wsdl2go/wsdl"
 	"github.com/fiorix/wsdl2go/wsdlgo"
@@ -17,15 +18,21 @@ import (
 var version = "tip"
 
 type options struct {
-	Src            string
-	Dst            string
-	Package        string
-	Namespace      string
-	GoClientType   string
-	Insecure       bool
-	ClientCertFile string
-	ClientKeyFile  string
-	Version        bool
+	Src                   string
+	Dst                   string
+	Package               string
+	Namespace             string
+	GoClientType          string
+	Insecure              bool
+	ClientCertFile        string
+	ClientKeyFile         string
+	Version               bool
+	generateOnlyTypes     bool
+	generateOnlyInterface bool
+}
+
+func (o options) Copy() options {
+	return o // Options are copied when returned from func
 }
 
 func main() {
@@ -41,15 +48,39 @@ func main() {
 	flag.StringVar(&opts.ClientKeyFile, "key", opts.ClientKeyFile, "use client TLS key file")
 	flag.BoolVar(&opts.Version, "version", opts.Version, "show version and exit")
 	flag.Parse()
+
 	if opts.Version {
 		fmt.Printf("wsdl2go %s\n", version)
 		return
 	}
+
+	codegen(opts)
+}
+
+func codegen(opts options) {
 	var w io.Writer
 	switch opts.Dst {
 	case "", "-":
 		w = os.Stdout
 	default:
+		if IsDir(opts.Dst) {
+			{
+				opts := opts.Copy()
+				opts.generateOnlyTypes = true
+				opts.Dst = strings.TrimSuffix(opts.Dst, "/") + "/types.go"
+
+				codegen(opts)
+			}
+			{
+				opts := opts.Copy()
+				opts.generateOnlyInterface = true
+				opts.Dst = strings.TrimSuffix(opts.Dst, "/") + "/interface.go"
+
+				codegen(opts)
+			}
+			return
+		}
+
 		f, err := os.OpenFile(opts.Dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
 			log.Fatal(err)
@@ -60,13 +91,21 @@ func main() {
 
 	cli := httpClient(opts.Insecure, opts.ClientCertFile, opts.ClientKeyFile)
 
-	err := codegen(w, opts, cli)
+	err := codegenToWriter(w, opts, cli)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func codegen(w io.Writer, opts options, cli *http.Client) error {
+func IsDir(path string) bool {
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return fileInfo.IsDir()
+}
+
+func codegenToWriter(w io.Writer, opts options, cli *http.Client) error {
 	var err error
 	var f io.ReadCloser
 	if opts.Src == "" || opts.Src == "-" {
@@ -90,6 +129,11 @@ func codegen(w io.Writer, opts options, cli *http.Client) error {
 	}
 	if opts.GoClientType != "" {
 		enc.SetGoClientType(opts.GoClientType)
+	}
+	if opts.generateOnlyTypes {
+		enc.GenerateOnlyTypes()
+	} else if opts.generateOnlyInterface {
+		enc.GenerateOnlyInterface()
 	}
 
 	if u, err := url.Parse(opts.Src); err == nil && u.User != nil {

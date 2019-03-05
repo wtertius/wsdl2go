@@ -51,6 +51,13 @@ type Encoder interface {
 	// SetGoClientType allows overriding of the go client type in generated code
 	// wsdl PortType name is used by default
 	SetGoClientType(goClientTypeName string)
+
+	// GenerateOnlyInterface generate only interface. Don't generate types
+	GenerateOnlyInterface()
+
+	// GenerateOnlyTypes generate only types. Don't generate interface.
+	// Has priority over GenerateOnlyInterface
+	GenerateOnlyTypes()
 }
 
 type goEncoder struct {
@@ -66,6 +73,9 @@ type goEncoder struct {
 	packageName fmt.Stringer
 	// go client type name
 	goClientType string
+
+	generateOnlyInterface bool
+	generateOnlyTypes     bool
 
 	// types cache
 	stypes map[string]*wsdl.SimpleType
@@ -147,6 +157,17 @@ func (ge *goEncoder) getGoClientType(d *wsdl.Definitions) string {
 	}
 
 	return d.PortType.Name
+}
+
+// GenerateOnlyInterface generate only interface. Don't generate types
+func (ge *goEncoder) GenerateOnlyInterface() {
+	ge.generateOnlyInterface = true
+}
+
+// GenerateOnlyTypes generate only types. Don't generate interface
+// Has priority over GenerateOnlyInterface
+func (ge *goEncoder) GenerateOnlyTypes() {
+	ge.generateOnlyTypes = true
 }
 
 func gofmtPath() (string, error) {
@@ -239,18 +260,40 @@ func (ge *goEncoder) encode(w io.Writer, d *wsdl.Definitions) error {
 	var b bytes.Buffer
 	var ff []func(io.Writer, *wsdl.Definitions) error
 	if len(ge.soapOps) > 0 {
-		ff = append(ff,
-			ge.writeInterfaceFuncs,
-			ge.writeGoTypes,
-			ge.writePortType,
-			ge.writeGoFuncs,
-		)
+		if ge.generateOnlyTypes {
+			ff = append(ff,
+				ge.writeGoTypes,
+			)
+		} else if ge.generateOnlyInterface {
+			ff = append(ff,
+				ge.writeInterfaceFuncs,
+				ge.writeGoClientType,
+				ge.writeGoClientFuncs,
+			)
+		} else {
+			ff = append(ff,
+				ge.writeInterfaceFuncs,
+				ge.writeGoTypes,
+				ge.writeGoClientType,
+				ge.writeGoClientFuncs,
+			)
+		}
 	} else {
 		// TODO: probably faulty wsdl?
-		ff = append(ff,
-			ge.writeGoFuncs,
-			ge.writeGoTypes,
-		)
+		if ge.generateOnlyTypes {
+			ff = append(ff,
+				ge.writeGoTypes,
+			)
+		} else if ge.generateOnlyInterface {
+			ff = append(ff,
+				ge.writeGoClientFuncs,
+			)
+		} else {
+			ff = append(ff,
+				ge.writeGoClientFuncs,
+				ge.writeGoTypes,
+			)
+		}
 	}
 	for _, f := range ff {
 		err := f(&b, d)
@@ -573,7 +616,7 @@ func (ge *goEncoder) writeInterfaceFuncs(w io.Writer, d *wsdl.Definitions) error
 		funcs[i] = &interfaceTypeFunc{
 			Doc:    doc.String(),
 			Name:   name,
-			Input:  strings.Join(in, ","),
+			Input:  ge.inputArgs(in),
 			Output: strings.Join(out, ","),
 		}
 		i++
@@ -598,7 +641,11 @@ type {{.Name}} struct {
 
 `))
 
-func (ge *goEncoder) writePortType(w io.Writer, d *wsdl.Definitions) error {
+func (ge *goEncoder) inputArgs(in []string) string {
+	return strings.Join(append([]string{"ctx context.Context"}, in...), ",")
+}
+
+func (ge *goEncoder) writeGoClientType(w io.Writer, d *wsdl.Definitions) error {
 	if len(ge.funcs) == 0 {
 		return nil
 	}
@@ -612,9 +659,11 @@ func (ge *goEncoder) writePortType(w io.Writer, d *wsdl.Definitions) error {
 	})
 }
 
-// writeGoFuncs writes Go function definitions from WSDL types to w.
+// writeGoClientFuncs writes Go function definitions from WSDL types to w.
 // Functions are written in the same order of the WSDL document.
-func (ge *goEncoder) writeGoFuncs(w io.Writer, d *wsdl.Definitions) error {
+func (ge *goEncoder) writeGoClientFuncs(w io.Writer, d *wsdl.Definitions) error {
+	ge.needsStdPkg["context"] = true
+
 	if d.Binding.Type != "" {
 		a, b := trimns(d.Binding.Type), trimns(d.PortType.Name)
 		if a != b {
@@ -648,12 +697,11 @@ func (ge *goEncoder) writeGoFuncs(w io.Writer, d *wsdl.Definitions) error {
 
 			ge.needsStdPkg["errors"] = true
 			ge.needsStdPkg["context"] = true
-			in = append([]string{"ctx context.Context"}, in...)
 
 			fn := ge.fixFuncNameConflicts(goSymbol(op.Name))
 			fmt.Fprintf(w, "func %s(%s) (%s) {\nreturn %s\n}\n\n",
 				fn,
-				strings.Join(in, ","),
+				ge.inputArgs(in),
 				strings.Join(out, ","),
 				strings.Join(ret, ","),
 			)
@@ -663,7 +711,7 @@ func (ge *goEncoder) writeGoFuncs(w io.Writer, d *wsdl.Definitions) error {
 }
 
 var soapFuncT = template.Must(template.New("soapFunc").Parse(
-	`func (p *{{.GoClientType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
+	`func (c *{{.GoClientType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
 	α := struct {
 		{{if .OpInputDataType}}
 			{{if .RPCStyle}}M{{end}} {{.OpInputDataType}} ` + "`xml:\"{{.OpName}}\"`" + `
@@ -680,7 +728,7 @@ var soapFuncT = template.Must(template.New("soapFunc").Parse(
 			{{if .RPCStyle}}M {{end}}{{.OpResponseDataType}} ` + "`xml:\"{{.OpResponseName}}\"`" + `
 		{{end}}
 	}{}
-	if err := p.cli.RoundTripWithAction("{{.Name}}", α, &γ); err != nil {
+	if err := c.cli.RoundTripWithAction("{{.Name}}", α, &γ); err != nil {
 		return {{.RetDef}}
 	}
 	return {{range $index, $element := .OpOutputNames}}{{index $.OpOutputPrefixes $index}}γ.{{if $.RPCStyle}}M.{{end}}{{$element}}, {{end}}nil
@@ -688,27 +736,13 @@ var soapFuncT = template.Must(template.New("soapFunc").Parse(
 `))
 
 var soapActionFuncT = template.Must(template.New("soapActionFunc").Parse(
-	`func (p *{{.GoClientType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
-	α := struct {
-		{{if .OpInputDataType}}
-			{{if .RPCStyle}}M{{end}} {{.OpInputDataType}} ` + "`xml:\"{{.OpName}}\"`" + `
+	`func (c *{{.GoClientType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
+	return c.call(
+		ctx,
+		"{{.Name}}",
+		{{range $index, $element := .InputNames}}{{$element}},
 		{{end}}
-	}{
-		{{if .OpInputDataType}}{{.OpInputDataType}} {
-			{{range $index, $element := .InputNames}}{{$element}},
-			{{end}}
-		},{{end}}
-	}
-
-	γ := struct {
-		{{if .OpResponseDataType}}
-			{{if .RPCStyle}}M {{end}}{{.OpResponseDataType}} ` + "`xml:\"{{.OpResponseName}}\"`" + `
-		{{end}}
-	}{}
-	if err := p.cli.{{.RoundTripType}}("{{.Action}}", α, &γ); err != nil {
-		return {{.RetDef}}
-	}
-	return {{range $index, $element := .OpOutputNames}}{{index $.OpOutputPrefixes $index}}γ.{{if $.RPCStyle}}M.{{end}}{{$element}}, {{end}}nil
+	)
 }
 `))
 
@@ -805,6 +839,8 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 	goClientType := ge.getGoClientType(d)
 	goClientType = strings.ToLower(goClientType[:1]) + goClientType[1:]
 
+	input := ge.inputArgs(code(in))
+
 	soapFunctionName := "RoundTripSoap12"
 	soapAction := ""
 
@@ -844,7 +880,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 			operationOutputDataType,
 			operationOutputNames,
 			operationOutputPrefixes,
-			strings.Join(code(in), ","),
+			input,
 			strings.Join(outputDataTypes, ","),
 			strings.Join(retDefaults, ","),
 			rpcStyle,
@@ -875,7 +911,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		operationOutputDataType,
 		operationOutputNames,
 		operationOutputPrefixes,
-		strings.Join(code(in), ","),
+		input,
 		strings.Join(outputDataTypes, ","),
 		strings.Join(retDefaults, ","),
 		rpcStyle,
