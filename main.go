@@ -21,6 +21,7 @@ type options struct {
 	Dst            string
 	Package        string
 	Namespace      string
+	GoClientType   string
 	Insecure       bool
 	ClientCertFile string
 	ClientKeyFile  string
@@ -34,6 +35,7 @@ func main() {
 	flag.StringVar(&opts.Dst, "o", opts.Dst, "output file, or '-' for stdout")
 	flag.StringVar(&opts.Namespace, "n", opts.Namespace, "override namespace")
 	flag.StringVar(&opts.Package, "p", opts.Package, "package name")
+	flag.StringVar(&opts.GoClientType, "go-client-type", opts.GoClientType, "port type name")
 	flag.BoolVar(&opts.Insecure, "yolo", opts.Insecure, "accept invalid https certificates")
 	flag.StringVar(&opts.ClientCertFile, "cert", opts.ClientCertFile, "use client TLS cert file")
 	flag.StringVar(&opts.ClientKeyFile, "key", opts.ClientKeyFile, "use client TLS key file")
@@ -85,6 +87,9 @@ func codegen(w io.Writer, opts options, cli *http.Client) error {
 	}
 	if opts.Namespace != "" {
 		enc.SetLocalNamespace(opts.Namespace)
+	}
+	if opts.GoClientType != "" {
+		enc.SetGoClientType(opts.GoClientType)
 	}
 
 	if u, err := url.Parse(opts.Src); err == nil && u.User != nil {

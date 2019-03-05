@@ -47,6 +47,10 @@ type Encoder interface {
 	// SetLocalNamespace allows overriding of the Namespace in XMLName instead
 	// of the one specified in wsdl
 	SetLocalNamespace(namespace string)
+
+	// SetGoClientType allows overriding of the go client type in generated code
+	// wsdl PortType name is used by default
+	SetGoClientType(goClientTypeName string)
 }
 
 type goEncoder struct {
@@ -60,6 +64,8 @@ type goEncoder struct {
 
 	// some mechanism to name package
 	packageName fmt.Stringer
+	// go client type name
+	goClientType string
 
 	// types cache
 	stypes map[string]*wsdl.SimpleType
@@ -127,6 +133,20 @@ func (ge *goEncoder) SetAuthInfo(host string, user *url.Userinfo) {
 	}
 
 	ge.authInfo[host] = user
+}
+
+// SetGoClientType allows overriding of the go client type in generated code
+// wsdl PortType name is used by default
+func (ge *goEncoder) SetGoClientType(name string) {
+	ge.goClientType = name
+}
+
+func (ge *goEncoder) getGoClientType(d *wsdl.Definitions) string {
+	if ge.goClientType != "" {
+		return ge.goClientType
+	}
+
+	return d.PortType.Name
 }
 
 func gofmtPath() (string, error) {
@@ -558,7 +578,7 @@ func (ge *goEncoder) writeInterfaceFuncs(w io.Writer, d *wsdl.Definitions) error
 		}
 		i++
 	}
-	n := d.PortType.Name
+	n := ge.getGoClientType(d)
 	return interfaceTypeT.Execute(w, &struct {
 		Name  string
 		Impl  string // private type that implements the interface
@@ -582,7 +602,7 @@ func (ge *goEncoder) writePortType(w io.Writer, d *wsdl.Definitions) error {
 	if len(ge.funcs) == 0 {
 		return nil
 	}
-	n := d.PortType.Name
+	n := ge.getGoClientType(d)
 	return portTypeT.Execute(w, &struct {
 		Name      string
 		Interface string
@@ -643,7 +663,7 @@ func (ge *goEncoder) writeGoFuncs(w io.Writer, d *wsdl.Definitions) error {
 }
 
 var soapFuncT = template.Must(template.New("soapFunc").Parse(
-	`func (p *{{.PortType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
+	`func (p *{{.GoClientType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
 	α := struct {
 		{{if .OpInputDataType}}
 			{{if .RPCStyle}}M{{end}} {{.OpInputDataType}} ` + "`xml:\"{{.OpName}}\"`" + `
@@ -668,7 +688,7 @@ var soapFuncT = template.Must(template.New("soapFunc").Parse(
 `))
 
 var soapActionFuncT = template.Must(template.New("soapActionFunc").Parse(
-	`func (p *{{.PortType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
+	`func (p *{{.GoClientType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
 	α := struct {
 		{{if .OpInputDataType}}
 			{{if .RPCStyle}}M{{end}} {{.OpInputDataType}} ` + "`xml:\"{{.OpName}}\"`" + `
@@ -782,8 +802,12 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		operationInputDataType = "struct{}"
 	}
 
+	goClientType := ge.getGoClientType(d)
+	goClientType = strings.ToLower(goClientType[:1]) + goClientType[1:]
+
 	soapFunctionName := "RoundTripSoap12"
 	soapAction := ""
+
 	if bindingOp, exists := ge.soapOps[op.Name]; exists {
 		soapAction = bindingOp.Operation.Action
 		if soapAction == "" {
@@ -795,7 +819,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		soapActionFuncT.Execute(w, &struct {
 			RoundTripType      string
 			Action             string
-			PortType           string
+			GoClientType       string
 			Name               string
 			OpName             string
 			OpInputDataType    string
@@ -811,7 +835,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		}{
 			soapFunctionName,
 			soapAction,
-			strings.ToLower(d.PortType.Name[:1]) + d.PortType.Name[1:],
+			goClientType,
 			goSymbol(op.Name),
 			namespacedOpName,
 			operationInputDataType,
@@ -828,7 +852,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		return true
 	}
 	soapFuncT.Execute(w, &struct {
-		PortType           string
+		GoClientType       string
 		Name               string
 		OpName             string
 		OpInputDataType    string
@@ -842,7 +866,7 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 		RetDef             string
 		RPCStyle           bool
 	}{
-		strings.ToLower(d.PortType.Name[:1]) + d.PortType.Name[1:],
+		goClientType,
 		goSymbol(op.Name),
 		namespacedOpName,
 		operationInputDataType,
