@@ -65,6 +65,7 @@ type Schema struct {
 	SimpleTypes     []*SimpleType     `xml:"simpleType"`
 	ComplexTypes    []*ComplexType    `xml:"complexType"`
 	Elements        []*Element        `xml:"element"`
+	AttributeGroups []*AttributeGroup `xml:"attributeGroup"`
 }
 
 // Unmarshaling solution from Matt Harden (http://grokbase.com/t/gg/golang-nuts/14bk21xb7a/go-nuts-extending-encoding-xml-to-capture-unknown-attributes)
@@ -120,16 +121,17 @@ type Enum struct {
 
 // ComplexType describes a complex type, such as a struct.
 type ComplexType struct {
-	XMLName         xml.Name        `xml:"complexType"`
-	Name            string          `xml:"name,attr"`
-	Abstract        bool            `xml:"abstract,attr"`
-	Doc             string          `xml:"annotation>documentation"`
-	AllElements     []*Element      `xml:"all>element"`
-	ComplexContent  *ComplexContent `xml:"complexContent"`
-	SimpleContent   *SimpleContent  `xml:"simpleContent"`
-	Sequence        *Sequence       `xml:"sequence"`
-	Choice          *Choice         `xml:"choice"`
-	Attributes      []*Attribute    `xml:"attribute"`
+	XMLName         xml.Name          `xml:"complexType"`
+	Name            string            `xml:"name,attr"`
+	Abstract        bool              `xml:"abstract,attr"`
+	Doc             string            `xml:"annotation>documentation"`
+	AllElements     []*Element        `xml:"all>element"`
+	ComplexContent  *ComplexContent   `xml:"complexContent"`
+	SimpleContent   *SimpleContent    `xml:"simpleContent"`
+	Sequence        *Sequence         `xml:"sequence"`
+	Choice          *Choice           `xml:"choice"`
+	Attributes      []*Attribute      `xml:"attribute"`
+	AttributeGroups []*AttributeGroup `xml:"attributeGroup"`
 	TargetNamespace string
 }
 
@@ -150,20 +152,22 @@ type ComplexContent struct {
 
 // Extension describes a complex content extension.
 type Extension struct {
-	XMLName    xml.Name     `xml:"extension"`
-	Base       string       `xml:"base,attr"`
-	Sequence   *Sequence    `xml:"sequence"`
-	Choice     *Choice      `xml:"choice"`
-	Attributes []*Attribute `xml:"attribute"`
+	XMLName         xml.Name          `xml:"extension"`
+	Base            string            `xml:"base,attr"`
+	Sequence        *Sequence         `xml:"sequence"`
+	Choice          *Choice           `xml:"choice"`
+	Attributes      []*Attribute      `xml:"attribute"`
+	AttributeGroups []*AttributeGroup `xml:"attributeGroup"`
 }
 
 // Sequence describes a list of elements (parameters) of a type.
 type Sequence struct {
-	XMLName      xml.Name       `xml:"sequence"`
-	ComplexTypes []*ComplexType `xml:"complexType"`
-	Elements     []*Element     `xml:"element"`
-	Any          []*AnyElement  `xml:"any"`
-	Choices      []*Choice      `xml:"choice"`
+	XMLName         xml.Name          `xml:"sequence"`
+	ComplexTypes    []*ComplexType    `xml:"complexType"`
+	Elements        []*Element        `xml:"element"`
+	Any             []*AnyElement     `xml:"any"`
+	Choices         []*Choice         `xml:"choice"`
+	AttributeGroups []*AttributeGroup `xml:"attributeGroup"`
 }
 
 // Choice describes a list of elements (parameters) of a type.
@@ -186,6 +190,14 @@ type Attribute struct {
 	Min       int      `xml:"minOccurs,attr"`
 	Max       string   `xml:"maxOccurs,attr"` // can be # or unbounded
 	Nillable  bool     `xml:"nillable,attr"`
+}
+
+// AttributeGroup describes a group of attributes.
+type AttributeGroup struct {
+	XMLName    xml.Name     `xml:"attributeGroup"`
+	Name       string       `xml:"name,attr"`
+	Ref        string       `xml:"ref,attr"`
+	Attributes []*Attribute `xml:"attribute"`
 }
 
 // Element describes an element of a given type.

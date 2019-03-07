@@ -93,7 +93,8 @@ type goEncoder struct {
 	wroteOpStruct map[string]bool
 
 	// elements cache
-	elements map[string]*wsdl.Element
+	elements       map[string]*wsdl.Element
+	attributeGroup map[string]*wsdl.AttributeGroup
 
 	// funcs cache
 	funcs     map[string]*wsdl.Operation
@@ -131,6 +132,7 @@ func NewEncoder(w io.Writer) Encoder {
 		typeAliases:     make(map[string]string),
 		wroteOpStruct:   make(map[string]bool),
 		elements:        make(map[string]*wsdl.Element),
+		attributeGroup:  make(map[string]*wsdl.AttributeGroup),
 		funcs:           make(map[string]*wsdl.Operation),
 		messages:        make(map[string]*wsdl.Message),
 		soapOps:         make(map[string]*wsdl.BindingOperation),
@@ -276,6 +278,7 @@ func (ge *goEncoder) encode(w io.Writer, d *wsdl.Definitions) error {
 		return fmt.Errorf("wsdl import: %v", err)
 	}
 	ge.setNamespace(d)
+	ge.cacheAttributeGroups(d)
 	ge.cacheTypes(d)
 	ge.cacheFuncs(d)
 	ge.cacheMessages(d)
@@ -426,6 +429,7 @@ func (ge *goEncoder) unionSchemasData(d *wsdl.Definitions, s *wsdl.Schema) {
 	d.Schema.ComplexTypes = append(d.Schema.ComplexTypes, s.ComplexTypes...)
 	d.Schema.SimpleTypes = append(d.Schema.SimpleTypes, s.SimpleTypes...)
 	d.Schema.Elements = append(d.Schema.Elements, s.Elements...)
+	d.Schema.AttributeGroups = append(d.Schema.AttributeGroups, s.AttributeGroups...)
 }
 
 // download xml from url, decode in v.
@@ -472,6 +476,12 @@ func (ge *goEncoder) setNamespace(d *wsdl.Definitions) {
 		if v.ComplexType != nil && v.ComplexType.TargetNamespace == "" {
 			v.ComplexType.TargetNamespace = d.Schema.TargetNamespace
 		}
+	}
+}
+
+func (ge *goEncoder) cacheAttributeGroups(d *wsdl.Definitions) {
+	for _, ag := range d.Schema.AttributeGroups {
+		ge.attributeGroup[ag.Name] = ag
 	}
 }
 
@@ -670,6 +680,13 @@ func (ge *goEncoder) flatComplexContent(ct *wsdl.ComplexType) {
 
 	ct.Attributes = ge.flatAttributeFields(ct.Attributes, ext.Attributes, RedefinedStructFields{})
 
+	for _, ag := range ext.AttributeGroups {
+		if ag.Ref != "" {
+			ag = ge.attributeGroup[ag.Ref]
+		}
+		ct.Attributes = ge.flatAttributeFields(ct.Attributes, ag.Attributes, RedefinedStructFields{})
+	}
+
 	sequences := make([]*wsdl.Sequence, 0)
 	if ext.Sequence != nil {
 		sequences = append(sequences, ext.Sequence)
@@ -699,6 +716,9 @@ func (ge *goEncoder) flatComplexContent(ct *wsdl.ComplexType) {
 		}
 		if seq.Elements != nil {
 			ct.Sequence.Elements = append(ct.Sequence.Elements, seq.Elements...)
+		}
+		if seq.AttributeGroups != nil {
+			ct.Sequence.AttributeGroups = append(ct.Sequence.AttributeGroups, seq.AttributeGroups...)
 		}
 		if seq.Any != nil {
 			ct.Sequence.Any = append(ct.Sequence.Any, seq.Any...)
@@ -741,12 +761,18 @@ func (ge *goEncoder) flatSimpleContent(ct *wsdl.ComplexType) {
 func (ge *goEncoder) flatFields(ct *wsdl.ComplexType) {
 	redefined := RedefinedStructFields{}
 
+	for _, ag := range ct.AttributeGroups {
+		if ag.Ref != "" {
+			ag = ge.attributeGroup[ag.Ref]
+		}
+		ct.Attributes = ge.flatAttributeFields(ct.Attributes, ag.Attributes, RedefinedStructFields{})
+	}
 	if ct.Sequence != nil {
 		for _, v := range ct.Sequence.ComplexTypes {
 			ge.flatTypeElements(v)
 
-			ct.Attributes = ge.flatAttributeFields(ct.Attributes, v.Attributes, RedefinedStructFields{})  //redefined)
-			ct.AllElements = ge.flatElementFields(ct.AllElements, v.AllElements, RedefinedStructFields{}) //redefined)
+			ct.Attributes = ge.flatAttributeFields(ct.Attributes, v.Attributes, RedefinedStructFields{})
+			ct.AllElements = ge.flatElementFields(ct.AllElements, v.AllElements, RedefinedStructFields{})
 		}
 
 		ct.AllElements = ge.flatElementFields(ct.AllElements, ct.Sequence.Elements, redefined)
