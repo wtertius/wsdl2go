@@ -98,8 +98,9 @@ type SimpleType struct {
 
 // Union is a mix of multiple types in a union.
 type Union struct {
-	XMLName     xml.Name `xml:"union"`
-	MemberTypes string   `xml:"memberTypes,attr"`
+	XMLName     xml.Name      `xml:"union"`
+	MemberTypes string        `xml:"memberTypes,attr"`
+	SimpleTypes []*SimpleType `xml:"simpleType"`
 }
 
 // Restriction describes the WSDL type of the simple type and
@@ -170,6 +171,7 @@ type Choice struct {
 	XMLName      xml.Name       `xml:"choice"`
 	ComplexTypes []*ComplexType `xml:"complexType"`
 	Elements     []*Element     `xml:"element"`
+	Sequence     *Sequence      `xml:"sequence"`
 	Any          []*AnyElement  `xml:"any"`
 }
 
@@ -177,6 +179,7 @@ type Choice struct {
 type Attribute struct {
 	XMLName   xml.Name `xml:"attribute"`
 	Name      string   `xml:"name,attr"`
+	TagName   string   `xml:"-"`
 	Ref       string   `xml:"ref,attr"`
 	Type      string   `xml:"type,attr"`
 	ArrayType string   `xml:"arrayType,attr"`
@@ -189,6 +192,7 @@ type Attribute struct {
 type Element struct {
 	XMLName     xml.Name     `xml:"element"`
 	Name        string       `xml:"name,attr"`
+	Tag         string       `xml:"-"`
 	Ref         string       `xml:"ref,attr"`
 	Type        string       `xml:"type,attr"`
 	Min         int          `xml:"minOccurs,attr"`

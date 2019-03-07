@@ -48,6 +48,9 @@ type Encoder interface {
 	// of the one specified in wsdl
 	SetLocalNamespace(namespace string)
 
+	// SetRequestVersion sets request version to set on every request
+	SetRequestVersion(version string)
+
 	// SetGoClientType allows overriding of the go client type in generated code
 	// wsdl PortType name is used by default
 	SetGoClientType(goClientTypeName string)
@@ -73,13 +76,17 @@ type goEncoder struct {
 	packageName fmt.Stringer
 	// go client type name
 	goClientType string
+	// requestVersion to set in request
+	requestVersion string
 
 	generateOnlyInterface bool
 	generateOnlyTypes     bool
 
 	// types cache
-	stypes map[string]*wsdl.SimpleType
-	ctypes map[string]*wsdl.ComplexType
+	stypes        map[string]*wsdl.SimpleType
+	ctypes        map[string]*wsdl.ComplexType
+	typeAliases   map[string]string
+	wroteOpStruct map[string]bool
 
 	// elements cache
 	elements map[string]*wsdl.Element
@@ -117,6 +124,8 @@ func NewEncoder(w io.Writer) Encoder {
 		authInfo:        make(map[string]*url.Userinfo),
 		stypes:          make(map[string]*wsdl.SimpleType),
 		ctypes:          make(map[string]*wsdl.ComplexType),
+		typeAliases:     make(map[string]string),
+		wroteOpStruct:   make(map[string]bool),
 		elements:        make(map[string]*wsdl.Element),
 		funcs:           make(map[string]*wsdl.Operation),
 		messages:        make(map[string]*wsdl.Message),
@@ -143,6 +152,11 @@ func (ge *goEncoder) SetAuthInfo(host string, user *url.Userinfo) {
 	}
 
 	ge.authInfo[host] = user
+}
+
+// SetRequestVersion sets request version to set on every request
+func (ge *goEncoder) SetRequestVersion(version string) {
+	ge.requestVersion = version
 }
 
 // SetGoClientType allows overriding of the go client type in generated code
@@ -252,10 +266,12 @@ func (ge *goEncoder) encode(w io.Writer, d *wsdl.Definitions) error {
 	if err != nil {
 		return fmt.Errorf("wsdl import: %v", err)
 	}
+	ge.setNamespace(d)
 	ge.cacheTypes(d)
 	ge.cacheFuncs(d)
 	ge.cacheMessages(d)
 	ge.cacheSOAPOperations(d)
+	ge.addVersionAttrToOpTypes()
 
 	var b bytes.Buffer
 	var ff []func(io.Writer, *wsdl.Definitions) error
@@ -313,10 +329,16 @@ func (ge *goEncoder) encode(w io.Writer, d *wsdl.Definitions) error {
 		fmt.Fprintf(w, "%q\n", pkg)
 	}
 	fmt.Fprintf(w, ")\n\n")
-	if d.TargetNamespace != "" {
+	if d.Schema.TargetNamespace != "" && !ge.generateOnlyInterface {
 		ge.writeComments(w, "Namespace", "")
-		fmt.Fprintf(w, "var Namespace = %q\n\n", d.TargetNamespace)
+		fmt.Fprintf(w, "var Namespace = %q\n\n", d.Schema.TargetNamespace)
 	}
+
+	if ge.requestVersion != "" && !ge.generateOnlyInterface {
+		ge.writeComments(w, "RequestVersion", "")
+		fmt.Fprintf(w, "var RequestVersion = %q\n\n", ge.requestVersion)
+	}
+
 	_, err = io.Copy(w, &b)
 	return err
 }
@@ -339,6 +361,7 @@ func (ge *goEncoder) importRoot(d *wsdl.Definitions) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -361,7 +384,7 @@ func (ge *goEncoder) importSchema(d *wsdl.Definitions) error {
 }
 
 func (ge *goEncoder) includeImport(d *wsdl.Definitions, location string) error {
-	if location == "" {
+	if location == "" || ge.importedSchemas[location] {
 		return nil
 	}
 	schema := &wsdl.Schema{}
@@ -370,21 +393,12 @@ func (ge *goEncoder) includeImport(d *wsdl.Definitions, location string) error {
 		return err
 	}
 	ge.unionSchemasData(d, schema)
+
 	for _, item := range schema.Imports {
-		schema = &wsdl.Schema{}
-		err := ge.importRemote(item.Location, schema)
-		if err != nil {
-			return err
-		}
-		ge.unionSchemasData(d, schema)
+		ge.includeImport(d, item.Location)
 	}
 	for _, item := range schema.Includes {
-		schema = &wsdl.Schema{}
-		err := ge.importRemote(item.Location, schema)
-		if err != nil {
-			return err
-		}
-		ge.unionSchemasData(d, schema)
+		ge.includeImport(d, item.Location)
 	}
 
 	return nil
@@ -406,13 +420,12 @@ func (ge *goEncoder) unionSchemasData(d *wsdl.Definitions, s *wsdl.Schema) {
 }
 
 // download xml from url, decode in v.
-func (ge *goEncoder) importRemote(loc string, v interface{}) error {
-	_, alreadyImported := ge.importedSchemas[loc]
-	if alreadyImported {
+func (ge *goEncoder) importRemote(location string, v interface{}) error {
+	if ge.importedSchemas[location] {
 		return nil
 	}
 
-	u, err := url.Parse(loc)
+	u, err := url.Parse(location)
 	if err != nil {
 		return err
 	}
@@ -428,7 +441,7 @@ func (ge *goEncoder) importRemote(loc string, v interface{}) error {
 		if err != nil {
 			return err
 		}
-		ge.importedSchemas[loc] = true
+		ge.importedSchemas[location] = true
 		defer resp.Body.Close()
 		r = resp.Body
 	default:
@@ -445,35 +458,103 @@ func (ge *goEncoder) importRemote(loc string, v interface{}) error {
 
 }
 
+func (ge *goEncoder) setNamespace(d *wsdl.Definitions) {
+	for _, v := range d.Schema.Elements {
+		if v.ComplexType != nil && v.ComplexType.TargetNamespace == "" {
+			v.ComplexType.TargetNamespace = d.Schema.TargetNamespace
+		}
+	}
+}
+
 func (ge *goEncoder) cacheTypes(d *wsdl.Definitions) {
 	// operation types are declared as go struct types
-	ge.cacheTypesForElements(d.Schema.Elements)
+	ge.cacheTypesForElements(d.Schema.Elements, "")
 
 	// simple types map 1:1 to go basic types
 	for _, v := range d.Schema.SimpleTypes {
 		ge.stypes[v.Name] = v
 	}
 	// complex types are declared as go struct types
-	for _, v := range d.Schema.ComplexTypes {
-		ge.ctypes[v.Name] = v
-	}
+	ge.cacheTypesForComplexTypes(d.Schema.ComplexTypes, "")
+
 	// cache elements from schema
 	ge.cacheElements(d.Schema.Elements)
 	// cache elements from complex types
 	for _, ct := range ge.ctypes {
 		ge.cacheComplexTypeElements(ct)
 	}
+
+	for _, ct := range ge.ctypes {
+		ge.flatTypeElements(ct)
+	}
 }
-func (ge *goEncoder) cacheTypesForElements(elements []*wsdl.Element) {
+
+func (ge *goEncoder) cacheTypesForComplexTypes(complexTypes []*wsdl.ComplexType, typePrefix string) {
+	for _, v := range complexTypes {
+		ge.cacheTypesForComplexType(v, typePrefix)
+	}
+}
+
+func (ge *goEncoder) cacheTypesForComplexType(v *wsdl.ComplexType, typeName string) {
+	if v.Name != "" {
+		typeName = v.Name
+	}
+
+	v.Name = typeName
+	ge.ctypes[typeName] = v
+
+	ge.cacheTypesForSequence(v.Sequence, typeName)
+
+	choice := v.Choice
+	if choice != nil {
+		ge.cacheTypesForElements(choice.Elements, typeName)
+
+		ge.cacheTypesForSequence(choice.Sequence, typeName)
+	}
+
+	cc := v.ComplexContent
+	if cc != nil {
+		cce := cc.Extension
+		if cce != nil && cce.Sequence != nil {
+			ge.cacheTypesForSequence(cce.Sequence, typeName)
+		}
+	}
+}
+func (ge *goEncoder) cacheTypesForSequence(seq *wsdl.Sequence, typeName string) {
+	if seq == nil {
+		return
+	}
+	ge.cacheTypesForComplexTypes(seq.ComplexTypes, "")
+	ge.cacheTypesForElements(seq.Elements, typeName)
+
+	for _, choice := range seq.Choices {
+		if choice == nil {
+			continue
+		}
+
+		ge.cacheTypesForComplexTypes(choice.ComplexTypes, "")
+		ge.cacheTypesForElements(choice.Elements, typeName)
+	}
+}
+
+func (ge *goEncoder) cacheTypesForElements(elements []*wsdl.Element, typePrefix string) {
 	for _, v := range elements {
-		if v.Type == "" && v.ComplexType != nil {
+		typeName := typePrefix + v.Name
+		if v.Name != "" && v.Type != "" {
+			ge.typeAliases[typeName] = v.Type
+		}
+		if v.ComplexType == nil {
+			continue
+		}
+
+		if v.Type == "" {
 			ct := *v.ComplexType
-			ct.Name = v.Name
-			ge.ctypes[v.Name] = &ct
+			ct.Name = typeName
+			ge.ctypes[typeName] = &ct
+			v.Type = typeName
+			// TODO Recognize type aliases through base: only extension base without fields and attrs
 		}
-		if v.ComplexType != nil && v.ComplexType.Sequence != nil {
-			ge.cacheTypesForElements(v.ComplexType.Sequence.Elements)
-		}
+		ge.cacheTypesForComplexType(v.ComplexType, typeName)
 	}
 }
 
@@ -528,10 +609,15 @@ func (ge *goEncoder) cacheElements(ct []*wsdl.Element) {
 			el.Type = el.Name
 		}
 		name := trimns(el.Name)
+
 		if _, exists := ge.elements[name]; exists {
 			continue
 		}
 		ge.elements[name] = el
+
+		if ge.typeAliases[el.Type] != "" {
+			el.Type = ge.typeAliases[el.Type]
+		}
 		ct := el.ComplexType
 		if ct != nil {
 			ge.cacheElements(ct.AllElements)
@@ -543,6 +629,167 @@ func (ge *goEncoder) cacheElements(ct []*wsdl.Element) {
 			}
 		}
 	}
+}
+
+func (ge *goEncoder) flatTypeElements(ct *wsdl.ComplexType) {
+	if ct.Sequence == nil {
+		ct.Sequence = &wsdl.Sequence{}
+	}
+
+	ge.flatComplexContent(ct)
+	ge.flatSimpleContent(ct)
+	ge.flatFields(ct)
+}
+
+func (ge *goEncoder) flatComplexContent(ct *wsdl.ComplexType) {
+	if ct.ComplexContent == nil || ct.ComplexContent.Extension == nil {
+		return
+	}
+
+	ext := ct.ComplexContent.Extension
+
+	ct.ComplexContent.Extension = nil
+	if ct.ComplexContent.Restriction == nil {
+		ct.ComplexContent = nil
+	}
+
+	if ext.Base != "" {
+		if base, exists := ge.ctypes[trimns(ext.Base)]; exists {
+			ct.Sequence.ComplexTypes = append(ct.Sequence.ComplexTypes, base)
+		}
+	}
+
+	ct.Attributes = ge.flatAttributeFields(ct.Attributes, ext.Attributes, RedefinedStructFields{})
+
+	sequences := make([]*wsdl.Sequence, 0)
+	if ext.Sequence != nil {
+		sequences = append(sequences, ext.Sequence)
+		for _, choice := range ext.Sequence.Choices {
+			seq := &wsdl.Sequence{
+				ComplexTypes: choice.ComplexTypes,
+				Elements:     choice.Elements,
+				Any:          choice.Any}
+			sequences = append(sequences, seq)
+		}
+	}
+	if ext.Choice != nil {
+		seq := &wsdl.Sequence{
+			ComplexTypes: ext.Choice.ComplexTypes,
+			Elements:     ext.Choice.Elements,
+			Any:          ext.Choice.Any}
+		sequences = append(sequences, seq)
+
+		if ext.Choice.Sequence != nil {
+			sequences = append(sequences, ext.Choice.Sequence)
+		}
+	}
+
+	for _, seq := range sequences {
+		if seq.ComplexTypes != nil {
+			ct.Sequence.ComplexTypes = append(ct.Sequence.ComplexTypes, seq.ComplexTypes...)
+		}
+		if seq.Elements != nil {
+			ct.Sequence.Elements = append(ct.Sequence.Elements, seq.Elements...)
+		}
+		if seq.Any != nil {
+			ct.Sequence.Any = append(ct.Sequence.Any, seq.Any...)
+		}
+	}
+}
+
+func (ge *goEncoder) flatSimpleContent(ct *wsdl.ComplexType) {
+	if ct.SimpleContent == nil || ct.SimpleContent.Extension == nil {
+		return
+	}
+
+	ext := ct.SimpleContent.Extension
+
+	ct.SimpleContent.Extension = nil
+	if ct.SimpleContent.Restriction == nil {
+		ct.SimpleContent = nil
+	}
+
+	ct.Attributes = ge.flatAttributeFields(ct.Attributes, ext.Attributes, RedefinedStructFields{})
+
+	if ext.Base != "" {
+		baseComplex, exists := ge.ctypes[trimns(ext.Base)]
+		if exists {
+			ct.Sequence.ComplexTypes = append(ct.Sequence.ComplexTypes, baseComplex)
+		} else {
+			// otherwise it's a simple type
+			el := &wsdl.Element{
+				Type: trimns(ext.Base),
+				Name: "Content",
+				Tag:  ",chardata",
+			}
+			ct.AllElements = ge.flatElementField(ct.AllElements, el, RedefinedStructFields{})
+		}
+	}
+
+	// sequence, choice, etc. are not supported in simpleContent tags.
+}
+
+func (ge *goEncoder) flatFields(ct *wsdl.ComplexType) {
+	redefined := RedefinedStructFields{}
+
+	if ct.Sequence != nil {
+		for _, v := range ct.Sequence.ComplexTypes {
+			ge.flatTypeElements(v)
+
+			ct.Attributes = ge.flatAttributeFields(ct.Attributes, v.Attributes, RedefinedStructFields{})  //redefined)
+			ct.AllElements = ge.flatElementFields(ct.AllElements, v.AllElements, RedefinedStructFields{}) //redefined)
+		}
+
+		ct.AllElements = ge.flatElementFields(ct.AllElements, ct.Sequence.Elements, redefined)
+
+		for _, choice := range ct.Sequence.Choices {
+			ct.AllElements = ge.flatElementFields(ct.AllElements, choice.Elements, redefined)
+		}
+	}
+	ct.Sequence = nil
+
+	if ct.Choice != nil {
+		ct.AllElements = ge.flatElementFields(ct.AllElements, ct.Choice.Elements, redefined)
+
+		if ct.Choice.Sequence != nil {
+			ct.AllElements = ge.flatElementFields(ct.AllElements, ct.Choice.Sequence.Elements, redefined)
+		}
+	}
+	ct.Choice = nil
+}
+
+func (ge *goEncoder) flatAttributeFields(attrs []*wsdl.Attribute, appendedAttrs []*wsdl.Attribute, redefined RedefinedStructFields) []*wsdl.Attribute {
+	for _, attr := range appendedAttrs {
+		attrs = ge.flatAttributeField(attrs, attr, redefined)
+	}
+
+	return attrs
+}
+
+func (ge *goEncoder) flatAttributeField(attrs []*wsdl.Attribute, attr *wsdl.Attribute, redefined RedefinedStructFields) []*wsdl.Attribute {
+	if redefined[attr.Name] {
+		return attrs
+	}
+	redefined[attr.Name] = true
+
+	return append(attrs, attr)
+}
+
+func (ge *goEncoder) flatElementFields(elements []*wsdl.Element, appendedElements []*wsdl.Element, redefined RedefinedStructFields) []*wsdl.Element {
+	for _, attr := range appendedElements {
+		elements = ge.flatElementField(elements, attr, redefined)
+	}
+
+	return elements
+}
+
+func (ge *goEncoder) flatElementField(elements []*wsdl.Element, el *wsdl.Element, redefined RedefinedStructFields) []*wsdl.Element {
+	if redefined[el.Name] {
+		return elements
+	}
+	redefined[el.Name] = true
+
+	return append(elements, el)
 }
 
 func (ge *goEncoder) cacheFuncs(d *wsdl.Definitions) {
@@ -571,9 +818,36 @@ func (ge *goEncoder) cacheSOAPOperations(d *wsdl.Definitions) {
 	}
 }
 
+func (ge *goEncoder) addVersionAttrToOpTypes() {
+	if ge.requestVersion != "" {
+		typeNamespace := &wsdl.Attribute{
+			XMLName:  xml.Name{Space: "http://www.w3.org/2001/XMLSchema", Local: "attribute"},
+			Name:     "TypeNamespace",
+			TagName:  "xmlns",
+			Type:     "xsd:string",
+			Nillable: false,
+		}
+		version := &wsdl.Attribute{
+			XMLName:  xml.Name{Space: "http://www.w3.org/2001/XMLSchema", Local: "attribute"},
+			Name:     "Version",
+			Type:     "xsd:string",
+			Nillable: false,
+		}
+
+		for _, f := range ge.funcs {
+			inputType := ge.messages[trimns(f.Input.Message)].Name
+
+			if ct, ok := ge.ctypes[inputType]; ok {
+				ct.Attributes = ge.flatAttributeField(ct.Attributes, typeNamespace, RedefinedStructFields{})
+				ct.Attributes = ge.flatAttributeField(ct.Attributes, version, RedefinedStructFields{})
+			}
+		}
+	}
+}
+
 var interfaceTypeT = template.Must(template.New("interfaceType").Parse(`
-// New{{.Name}} creates an initializes a {{.Name}}.
-func New{{.Name}}(cli *soap.Client) {{.Name}} {
+// new{{.Name}} creates an initializes a {{.Name}}.
+func new{{.Name}}(cli *client) {{.Name}} {
 	return &{{.Impl}}{cli}
 }
 
@@ -636,7 +910,7 @@ func (ge *goEncoder) writeInterfaceFuncs(w io.Writer, d *wsdl.Definitions) error
 var portTypeT = template.Must(template.New("portType").Parse(`
 // {{.Name}} implements the {{.Interface}} interface.
 type {{.Name}} struct {
-	cli *soap.Client
+	cli *client
 }
 
 `))
@@ -662,6 +936,7 @@ func (ge *goEncoder) writeGoClientType(w io.Writer, d *wsdl.Definitions) error {
 // writeGoClientFuncs writes Go function definitions from WSDL types to w.
 // Functions are written in the same order of the WSDL document.
 func (ge *goEncoder) writeGoClientFuncs(w io.Writer, d *wsdl.Definitions) error {
+	ge.needsStdPkg["fmt"] = true
 	ge.needsStdPkg["context"] = true
 
 	if d.Binding.Type != "" {
@@ -737,12 +1012,35 @@ var soapFuncT = template.Must(template.New("soapFunc").Parse(
 
 var soapActionFuncT = template.Must(template.New("soapActionFunc").Parse(
 	`func (c *{{.GoClientType}}) {{.Name}}({{.Input}}) ({{.Output}}) {
-	return c.call(
+    {{index .InputNames 0}}.Version = RequestVersion
+    {{index .InputNames 0}}.TypeNamespace = Namespace
+    {{index .InputNames 0}}.Party = c.cli.party
+
+	req := struct {
+		{{if .OpInputDataType}}
+			{{if .RPCStyle}}M{{end}} {{.OpInputDataType}} ` + "`xml:\"{{.OpName}}\"`" + `
+		{{end}}
+	}{
+		{{if .OpInputDataType}}{{.OpInputDataType}} {
+			{{range $index, $element := .InputNames}}{{$element}},
+			{{end}}
+		},{{end}}
+	}
+
+    res, err := c.cli.call(
 		ctx,
 		"{{.Name}}",
-		{{range $index, $element := .InputNames}}{{$element}},
-		{{end}}
+        req,
 	)
+
+    if err != nil {
+		return nil, err
+    }
+    if res, ok := res.(*{{index .OpOutputNames 0}}); ok {
+        return res, nil
+    }
+
+    return nil, fmt.Errorf("Can't assert result to *{{index .OpOutputNames 0}}: %#v", res)
 }
 `))
 
@@ -758,8 +1056,6 @@ func (ge *goEncoder) writeSOAPFunc(w io.Writer, d *wsdl.Definitions, op *wsdl.Op
 	if d.Binding.BindingType != nil {
 		rpcStyle = d.Binding.BindingType.Style == "rpc"
 	}
-
-	ge.needsExtPkg["github.com/fiorix/wsdl2go/soap"] = true
 
 	// inputNames describe the accessors to the input parameter names
 	inputNames := make([]string, len(in))
@@ -1132,8 +1428,16 @@ func (ge *goEncoder) wsdl2goType(t string) string {
 		return "Duration"
 	case "anysequence", "anytype", "anysimpletype":
 		return "interface{}"
+	case "idref":
+		return "uint64"
+	case "idrefs":
+		return "[]uint64"
 	default:
-		return "*" + goSymbol(v)
+		v = goSymbol(v)
+		if ge.ctypes[v] == nil {
+			return "string"
+		}
+		return "*" + v
 	}
 }
 
@@ -1190,17 +1494,40 @@ func (ge *goEncoder) writeGoTypes(w io.Writer, d *wsdl.Definitions) error {
 			ge.genValidator(&b, stname, st.Restriction)
 		} else if st.Union != nil {
 			types := strings.Split(st.Union.MemberTypes, " ")
-			ntypes := make([]string, len(types))
-			for i, t := range types {
+			ntypes := make([]string, 0, len(types))
+			baseTypes := make(map[string]struct{}, len(types))
+			for _, t := range types {
 				t = strings.TrimSpace(t)
 				if t == "" {
 					continue
 				}
-				ntypes[i] = ge.wsdl2goType(t)
+				ntypes = append(ntypes, ge.wsdl2goType(t))
+				if st, ok := ge.stypes[t]; ok {
+					if st.Restriction == nil {
+						continue
+					}
+					baseTypes[st.Restriction.Base] = struct{}{}
+				} else {
+					panic(fmt.Sprintf("Union for '%s': simple type '%s' must be in ge.stypes", stname, t))
+				}
 			}
+			for _, t := range st.Union.SimpleTypes {
+				ntypes = append(ntypes, "ANONIMOUS")
+				if t.Restriction == nil {
+					continue
+				}
+				baseTypes[t.Restriction.Base] = struct{}{}
+			}
+
 			doc := stname + " is a union of: " + strings.Join(ntypes, ", ")
 			ge.writeComments(&b, stname, doc)
-			fmt.Fprintf(&b, "type %s interface{}\n\n", stname)
+			if len(baseTypes) == 1 {
+				for baseType := range baseTypes {
+					fmt.Fprintf(&b, "type %s %s\n\n", stname, ge.wsdl2goType(baseType))
+				}
+			} else {
+				fmt.Fprintf(&b, "type %s interface{}\n\n", stname)
+			}
 		}
 	}
 	var err error
@@ -1345,11 +1672,6 @@ func (ge *goEncoder) genGoXMLTypeFunction(w io.Writer, ct *wsdl.ComplexType) {
 	if ext.Base != "" && !ct.Abstract {
 		ge.writeComments(w, "SetXMLType", "")
 		fmt.Fprintf(w, "func (t *%s) SetXMLType() {\n", goSymbol(ct.Name))
-		fmt.Fprintf(w, "if t.OverrideTypeAttrXSI != nil {\n")
-		fmt.Fprintf(w, "    t.TypeAttrXSI = *t.OverrideTypeAttrXSI\n")
-		fmt.Fprintf(w, "} else {\n")
-		fmt.Fprintf(w, "    t.TypeAttrXSI = \"objtype:%s\"\n", ct.Name)
-		fmt.Fprintf(w, "}\n")
 		fmt.Fprintf(w, "if t.OverrideTypeNamespace != nil {\n")
 		fmt.Fprintf(w, "    t.TypeNamespace = *t.OverrideTypeNamespace\n")
 		fmt.Fprintf(w, "} else {\n")
@@ -1403,7 +1725,7 @@ func (ge *goEncoder) genGoStruct(w io.Writer, d *wsdl.Definitions, ct *wsdl.Comp
 	} else if ct.Sequence != nil &&
 		(len(ct.Sequence.ComplexTypes) == 0 && len(ct.Sequence.Elements) == 0 && len(ct.Sequence.Choices) == 0) {
 		c++
-	} else if ct.Choice != nil && (len(ct.Choice.ComplexTypes) == 0 && len(ct.Choice.Elements) == 0) {
+	} else if ct.Choice != nil && (len(ct.Choice.ComplexTypes) == 0 && len(ct.Choice.Elements) == 0 && (ct.Choice.Sequence == nil || len(ct.Choice.Sequence.Elements) == 0)) {
 		c++
 	}
 
@@ -1445,13 +1767,14 @@ func (ge *goEncoder) genGoStruct(w io.Writer, d *wsdl.Definitions, ct *wsdl.Comp
 	fmt.Fprintf(w, "type %s struct {\n", name)
 	ge.genXMLName(w, d.TargetNamespace, name)
 
-	err := ge.genStructFields(w, d, ct)
+	err := ge.genStructFields(w, d, ct, RedefinedStructFields{})
 
-	if ct.ComplexContent != nil && ct.ComplexContent.Extension != nil {
-		fmt.Fprint(w, "TypeAttrXSI   string `xml:\"xsi:type,attr,omitempty\"`\n")
-		fmt.Fprint(w, "TypeNamespace string `xml:\"xmlns:objtype,attr,omitempty\"`\n")
+	if (ct.ComplexContent != nil && ct.ComplexContent.Extension != nil) ||
+		(ct.Choice != nil && ct.Choice.Sequence != nil) ||
+		(ct.Sequence != nil) {
+
+		fmt.Fprint(w, "TypeNamespace string `xml:\"xmlns,attr,omitempty\"`\n")
 		fmt.Fprint(w, "\n")
-		fmt.Fprint(w, "OverrideTypeAttrXSI   *string `xml:\"-\"`\n")
 		fmt.Fprint(w, "OverrideTypeNamespace *string `xml:\"-\"`\n")
 	}
 	if err != nil {
@@ -1478,22 +1801,13 @@ func (ge *goEncoder) genGoOpStruct(w io.Writer, d *wsdl.Definitions, bo *wsdl.Bi
 	return nil
 }
 
-func (ge *goEncoder) genStructFields(w io.Writer, d *wsdl.Definitions, ct *wsdl.ComplexType) error {
-	err := ge.genComplexContent(w, d, ct)
-	if err != nil {
-		return err
-	}
-
-	err = ge.genSimpleContent(w, d, ct)
-	if err != nil {
-		return err
-	}
-
-	return ge.genElements(w, ct)
-}
-
 func (ge *goEncoder) genOpStructMessage(w io.Writer, d *wsdl.Definitions, name string, message *wsdl.Message) {
 	sanitizedMessageName := ge.sanitizedOperationsType(message.Name)
+
+	if ge.wroteOpStruct[sanitizedMessageName] {
+		return
+	}
+	ge.wroteOpStruct[sanitizedMessageName] = true
 
 	ge.writeComments(w, sanitizedMessageName, "Operation wrapper for "+name+".")
 	ge.writeComments(w, sanitizedMessageName, "")
@@ -1528,120 +1842,62 @@ func (ge *goEncoder) genOpStructMessage(w io.Writer, d *wsdl.Definitions, name s
 			Name:    partName,
 			Type:    wsdlType,
 			// TODO: Maybe one could make guesses about nillable?
-		})
+		}, RedefinedStructFields{})
 	}
 
 	fmt.Fprintf(w, "}\n\n")
 }
 
-func (ge *goEncoder) genComplexContent(w io.Writer, d *wsdl.Definitions, ct *wsdl.ComplexType) error {
-	if ct.ComplexContent == nil || ct.ComplexContent.Extension == nil {
-		return nil
-	}
-	ext := ct.ComplexContent.Extension
-	if ext.Base != "" {
-		base, exists := ge.ctypes[trimns(ext.Base)]
-		if exists {
-			err := ge.genStructFields(w, d, base)
-			if err != nil {
-				return err
-			}
-		}
-	}
+type RedefinedStructFields map[string]bool
 
-	for _, attr := range ext.Attributes {
-		ge.genAttributeField(w, attr)
-	}
-
-	sequences := make([]*wsdl.Sequence, 0)
-	if ext.Sequence != nil {
-		sequences = append(sequences, ext.Sequence)
-		for _, choice := range ext.Sequence.Choices {
-			tmpSeq := &wsdl.Sequence{
-				ComplexTypes: choice.ComplexTypes,
-				Elements:     choice.Elements,
-				Any:          choice.Any}
-			sequences = append(sequences, tmpSeq)
-		}
-	}
-	if ext.Choice != nil {
-		tmpSeq := &wsdl.Sequence{
-			ComplexTypes: ext.Choice.ComplexTypes,
-			Elements:     ext.Choice.Elements,
-			Any:          ext.Choice.Any}
-		sequences = append(sequences, tmpSeq)
-	}
-	for _, seq := range sequences {
-		for _, v := range seq.ComplexTypes {
-			err := ge.genElements(w, v)
-			if err != nil {
-				return err
-			}
-		}
-		for _, v := range seq.Elements {
-			ge.genElementField(w, v)
-		}
-
-	}
-	return nil
-}
-
-func (ge *goEncoder) genSimpleContent(w io.Writer, d *wsdl.Definitions, ct *wsdl.ComplexType) error {
-	if ct.SimpleContent == nil || ct.SimpleContent.Extension == nil {
-		return nil
-	}
-
-	ext := ct.SimpleContent.Extension
-	if ext.Base != "" {
-		baseComplex, exists := ge.ctypes[trimns(ext.Base)]
-		if exists {
-			err := ge.genStructFields(w, d, baseComplex)
-			if err != nil {
-				return err
-			}
-		} else {
-			// otherwise it's a simple type
-			ge.genElementField(w, &wsdl.Element{
-				Type: trimns(ext.Base),
-				Name: "Content",
-			})
-		}
-	}
-
-	for _, attr := range ext.Attributes {
-		ge.genAttributeField(w, attr)
-	}
-
-	// sequence, choice, etc. are not supported in simpleContent tags.
-	return nil
-}
-
-func (ge *goEncoder) genElements(w io.Writer, ct *wsdl.ComplexType) error {
+func (ge *goEncoder) genStructFields(w io.Writer, d *wsdl.Definitions, ct *wsdl.ComplexType, redefined RedefinedStructFields) error {
 	for _, el := range ct.AllElements {
-		ge.genElementField(w, el)
+		ge.genElementField(w, el, redefined)
 	}
 	if ct.Sequence != nil {
 		for _, el := range ct.Sequence.Elements {
-			ge.genElementField(w, el)
+			ge.genElementField(w, el, redefined)
 		}
 		for _, choice := range ct.Sequence.Choices {
 			for _, el := range choice.Elements {
-				ge.genElementField(w, el)
+				ge.genElementField(w, el, redefined)
 			}
 		}
 	}
 	if ct.Choice != nil {
 		for _, el := range ct.Choice.Elements {
-			ge.genElementField(w, el)
+			ge.genElementField(w, el, redefined)
+		}
+
+		if ct.Choice.Sequence != nil {
+			for _, el := range ct.Choice.Sequence.Elements {
+				ge.genElementField(w, el, redefined)
+			}
 		}
 	}
 	for _, attr := range ct.Attributes {
-		ge.genAttributeField(w, attr)
+		ge.genAttributeField(w, attr, redefined)
 	}
+
+	if ge.requestVersion != "" {
+		attr := &wsdl.Attribute{
+			XMLName:  xml.Name{Space: "http://www.w3.org/2001/XMLSchema", Local: "attribute"},
+			Name:     "Version",
+			Type:     "xsd:string",
+			Nillable: false,
+		}
+		ge.genAttributeField(w, attr, redefined)
+	}
+
 	return nil
 }
 
-func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element) {
+func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element, redefined RedefinedStructFields) {
+	if redefined[el.Name] {
+		return
+	}
+	redefined[el.Name] = true
+
 	if el.Ref != "" {
 		ref := trimns(el.Ref)
 		nel, ok := ge.elements[ref]
@@ -1678,13 +1934,12 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element) {
 			}
 		}
 	}
+
 	et := el.Type
-	if et == "" && ge.ctypes[el.Name] != nil {
-		et = el.Name
-	}
 	if et == "" {
 		et = "string"
 	}
+
 	tag := el.Name
 	fmt.Fprintf(w, "%s ", goSymbol(el.Name))
 	if el.Max != "" && el.Max != "1" {
@@ -1693,6 +1948,7 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element) {
 			tag = el.Name + ">" + slicetype
 		}
 	}
+
 	typ := ge.wsdl2goType(et)
 	if el.Nillable || el.Min == 0 {
 		tag += ",omitempty"
@@ -1702,11 +1958,20 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element) {
 			typ = "*" + typ
 		}
 	}
+	if el.Tag != "" {
+		tag = el.Tag
+	}
+
 	fmt.Fprintf(w, "%s `xml:\"%s\" json:\"%s\" yaml:\"%s\"`\n",
 		typ, tag, tag, tag)
 }
 
-func (ge *goEncoder) genAttributeField(w io.Writer, attr *wsdl.Attribute) {
+func (ge *goEncoder) genAttributeField(w io.Writer, attr *wsdl.Attribute, redefined RedefinedStructFields) {
+	if redefined[attr.Name] {
+		return
+	}
+	redefined[attr.Name] = true
+
 	if attr.Name == "" && attr.Ref != "" {
 		attr.Name = trimns(attr.Ref)
 	}
@@ -1714,7 +1979,12 @@ func (ge *goEncoder) genAttributeField(w io.Writer, attr *wsdl.Attribute) {
 		attr.Type = "string"
 	}
 
-	tag := fmt.Sprintf("%s,attr", attr.Name)
+	tagName := attr.TagName
+	if tagName == "" {
+		tagName = attr.Name
+	}
+
+	tag := fmt.Sprintf("%s,attr", tagName)
 	fmt.Fprintf(w, "%s ", goSymbol(attr.Name))
 	typ := ge.wsdl2goType(attr.Type)
 	if attr.Nillable || attr.Min == 0 {

@@ -27,6 +27,7 @@ type options struct {
 	ClientCertFile        string
 	ClientKeyFile         string
 	Version               bool
+	RequestVersion        string
 	generateOnlyTypes     bool
 	generateOnlyInterface bool
 }
@@ -47,6 +48,7 @@ func main() {
 	flag.StringVar(&opts.ClientCertFile, "cert", opts.ClientCertFile, "use client TLS cert file")
 	flag.StringVar(&opts.ClientKeyFile, "key", opts.ClientKeyFile, "use client TLS key file")
 	flag.BoolVar(&opts.Version, "version", opts.Version, "show version and exit")
+	flag.StringVar(&opts.RequestVersion, "request-version", opts.RequestVersion, "set version to request")
 	flag.Parse()
 
 	if opts.Version {
@@ -129,6 +131,9 @@ func codegenToWriter(w io.Writer, opts options, cli *http.Client) error {
 	}
 	if opts.GoClientType != "" {
 		enc.SetGoClientType(opts.GoClientType)
+	}
+	if opts.RequestVersion != "" {
+		enc.SetRequestVersion(opts.RequestVersion)
 	}
 	if opts.generateOnlyTypes {
 		enc.GenerateOnlyTypes()
