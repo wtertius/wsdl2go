@@ -945,8 +945,8 @@ func (ge *goEncoder) writeGoClientType(w io.Writer, d *wsdl.Definitions) error {
 // writeGoClientFuncs writes Go function definitions from WSDL types to w.
 // Functions are written in the same order of the WSDL document.
 func (ge *goEncoder) writeGoClientFuncs(w io.Writer, d *wsdl.Definitions) error {
-	ge.needsStdPkg["fmt"] = true
 	ge.needsStdPkg["context"] = true
+	ge.needsStdPkg["encoding/xml"] = true
 
 	if d.Binding.Type != "" {
 		a, b := trimns(d.Binding.Type), trimns(d.PortType.Name)
@@ -1036,20 +1036,23 @@ var soapActionFuncT = template.Must(template.New("soapActionFunc").Parse(
 		},{{end}}
 	}
 
-    res, err := c.cli.call(
-		ctx,
-		"{{.Name}}",
-        req,
-	)
+	res := struct {
+		XMLName  xml.Name ` + "`xml:\"Envelope\"`" + `
+		XMLNSNS2 string   ` + "`xml:\"xmlns:ns2,attr\"`" + `
+		XMLNSNS3 string   ` + "`xml:\"xmlns:ns3,attr\"`" + `
+        Body     struct {
+            {{if .OpResponseDataType}}
+                {{if .RPCStyle}}M {{end}}{{index .OpOutputNames 0}} {{index .OpOutputNames 0}}
+            {{end}}
+        } ` + "`xml:\"Body\"`" + `
+	}{}
 
+    err := c.cli.call(ctx, "{{.Name}}", req, &res)
     if err != nil {
 		return nil, err
     }
-    if res, ok := res.(*{{index .OpOutputNames 0}}); ok {
-        return res, nil
-    }
 
-    return nil, fmt.Errorf("Can't assert result to *{{index .OpOutputNames 0}}: %#v", res)
+    return &res.Body.{{index .OpOutputNames 0}}, nil
 }
 `))
 
@@ -1438,9 +1441,9 @@ func (ge *goEncoder) wsdl2goType(t string) string {
 	case "anysequence", "anytype", "anysimpletype":
 		return "interface{}"
 	case "idref":
-		return "uint64"
+		return "string"
 	case "idrefs":
-		return "[]uint64"
+		return "string"
 	default:
 		v = goSymbol(v)
 		if ge.ctypes[v] == nil {
