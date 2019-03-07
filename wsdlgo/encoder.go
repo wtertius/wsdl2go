@@ -1912,11 +1912,11 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element, redefined Re
 
 	if el.Ref != "" {
 		ref := trimns(el.Ref)
-		nel, ok := ge.elements[ref]
+		refElement, ok := ge.elements[ref]
 		if !ok {
 			return
 		}
-		el = nel
+		el = refElement.Copy().Enrich(el)
 	}
 	var slicetype string
 	if el.Type == "" && el.ComplexType != nil {

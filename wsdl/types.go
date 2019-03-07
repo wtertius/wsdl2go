@@ -201,6 +201,23 @@ type Element struct {
 	ComplexType *ComplexType `xml:"complexType"`
 }
 
+func (e *Element) Copy() *Element {
+	return &(*e)
+}
+func (e *Element) Enrich(source *Element) *Element {
+	if source.Min != 0 {
+		e.Min = source.Min
+	}
+	if source.Max != "" {
+		e.Max = source.Max
+	}
+	if source.Nillable {
+		e.Nillable = source.Nillable
+	}
+
+	return e
+}
+
 // AnyElement describes an element of an undefined type.
 type AnyElement struct {
 	XMLName xml.Name `xml:"any"`
