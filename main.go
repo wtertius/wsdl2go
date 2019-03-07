@@ -28,6 +28,7 @@ type options struct {
 	ClientKeyFile         string
 	Version               bool
 	RequestVersion        string
+	NoSimpleTypeIndirect  bool
 	generateOnlyTypes     bool
 	generateOnlyInterface bool
 }
@@ -49,6 +50,7 @@ func main() {
 	flag.StringVar(&opts.ClientKeyFile, "key", opts.ClientKeyFile, "use client TLS key file")
 	flag.BoolVar(&opts.Version, "version", opts.Version, "show version and exit")
 	flag.StringVar(&opts.RequestVersion, "request-version", opts.RequestVersion, "set version to request")
+	flag.BoolVar(&opts.NoSimpleTypeIndirect, "no-simple-type-pointers", opts.NoSimpleTypeIndirect, "don't add * indirection to simple types")
 	flag.Parse()
 
 	if opts.Version {
@@ -135,12 +137,14 @@ func codegenToWriter(w io.Writer, opts options, cli *http.Client) error {
 	if opts.RequestVersion != "" {
 		enc.SetRequestVersion(opts.RequestVersion)
 	}
+	if opts.NoSimpleTypeIndirect {
+		enc.NoSimpleTypeIndirect()
+	}
 	if opts.generateOnlyTypes {
 		enc.GenerateOnlyTypes()
 	} else if opts.generateOnlyInterface {
 		enc.GenerateOnlyInterface()
 	}
-
 	if u, err := url.Parse(opts.Src); err == nil && u.User != nil {
 		enc.SetAuthInfo(u.Host, u.User)
 	}

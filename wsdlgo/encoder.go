@@ -51,6 +51,9 @@ type Encoder interface {
 	// SetRequestVersion sets request version to set on every request
 	SetRequestVersion(version string)
 
+	// NoSimpleTypeIndirect Don't add * indirection to simple types
+	NoSimpleTypeIndirect()
+
 	// SetGoClientType allows overriding of the go client type in generated code
 	// wsdl PortType name is used by default
 	SetGoClientType(goClientTypeName string)
@@ -81,6 +84,7 @@ type goEncoder struct {
 
 	generateOnlyInterface bool
 	generateOnlyTypes     bool
+	noSimpleTypeIndirect  bool
 
 	// types cache
 	stypes        map[string]*wsdl.SimpleType
@@ -171,6 +175,11 @@ func (ge *goEncoder) getGoClientType(d *wsdl.Definitions) string {
 	}
 
 	return d.PortType.Name
+}
+
+// NoSimpleTypeIndirect Don't add * indirection to simple types
+func (ge *goEncoder) NoSimpleTypeIndirect() {
+	ge.noSimpleTypeIndirect = true
 }
 
 // GenerateOnlyInterface generate only interface. Don't generate types
@@ -1951,10 +1960,11 @@ func (ge *goEncoder) genElementField(w io.Writer, el *wsdl.Element, redefined Re
 
 	typ := ge.wsdl2goType(et)
 	if el.Nillable || el.Min == 0 {
+
 		tag += ",omitempty"
 		//since we add omitempty tag, we should add pointer to type.
 		//thus xmlencoder can differ not-initialized fields from zero-initialized values
-		if !strings.HasPrefix(typ, "*") {
+		if !ge.noSimpleTypeIndirect && !strings.HasPrefix(typ, "*") {
 			typ = "*" + typ
 		}
 	}
