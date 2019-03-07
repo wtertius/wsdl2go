@@ -711,6 +711,9 @@ func (ge *goEncoder) flatComplexContent(ct *wsdl.ComplexType) {
 	}
 
 	for _, seq := range sequences {
+		if seq.Sequences != nil {
+			ct.Sequence.Sequences = append(ct.Sequence.Sequences, seq.Sequences...)
+		}
 		if seq.ComplexTypes != nil {
 			ct.Sequence.ComplexTypes = append(ct.Sequence.ComplexTypes, seq.ComplexTypes...)
 		}
@@ -758,6 +761,29 @@ func (ge *goEncoder) flatSimpleContent(ct *wsdl.ComplexType) {
 	// sequence, choice, etc. are not supported in simpleContent tags.
 }
 
+func (ge *goEncoder) flatSequence(ct *wsdl.ComplexType, seq *wsdl.Sequence, redefined RedefinedStructFields) {
+	if seq == nil {
+		return
+	}
+
+	for _, seq := range seq.Sequences {
+		ge.flatSequence(ct, seq, redefined)
+	}
+
+	for _, v := range seq.ComplexTypes {
+		ge.flatTypeElements(v)
+
+		ct.Attributes = ge.flatAttributeFields(ct.Attributes, v.Attributes, RedefinedStructFields{})
+		ct.AllElements = ge.flatElementFields(ct.AllElements, v.AllElements, RedefinedStructFields{})
+	}
+
+	ct.AllElements = ge.flatElementFields(ct.AllElements, seq.Elements, redefined)
+
+	for _, choice := range seq.Choices {
+		ct.AllElements = ge.flatElementFields(ct.AllElements, choice.Elements, redefined)
+	}
+}
+
 func (ge *goEncoder) flatFields(ct *wsdl.ComplexType) {
 	redefined := RedefinedStructFields{}
 
@@ -768,18 +794,7 @@ func (ge *goEncoder) flatFields(ct *wsdl.ComplexType) {
 		ct.Attributes = ge.flatAttributeFields(ct.Attributes, ag.Attributes, RedefinedStructFields{})
 	}
 	if ct.Sequence != nil {
-		for _, v := range ct.Sequence.ComplexTypes {
-			ge.flatTypeElements(v)
-
-			ct.Attributes = ge.flatAttributeFields(ct.Attributes, v.Attributes, RedefinedStructFields{})
-			ct.AllElements = ge.flatElementFields(ct.AllElements, v.AllElements, RedefinedStructFields{})
-		}
-
-		ct.AllElements = ge.flatElementFields(ct.AllElements, ct.Sequence.Elements, redefined)
-
-		for _, choice := range ct.Sequence.Choices {
-			ct.AllElements = ge.flatElementFields(ct.AllElements, choice.Elements, redefined)
-		}
+		ge.flatSequence(ct, ct.Sequence, redefined)
 	}
 	ct.Sequence = nil
 

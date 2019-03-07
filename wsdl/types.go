@@ -164,6 +164,7 @@ type Extension struct {
 type Sequence struct {
 	XMLName         xml.Name          `xml:"sequence"`
 	ComplexTypes    []*ComplexType    `xml:"complexType"`
+	Sequences       []*Sequence       `xml:"sequence"`
 	Elements        []*Element        `xml:"element"`
 	Any             []*AnyElement     `xml:"any"`
 	Choices         []*Choice         `xml:"choice"`
